@@ -5,10 +5,12 @@ message-component doubles so the pure message-chain logic can be tested
 without installing the whole AstrBot runtime.
 """
 
+import asyncio
 import importlib.util
 import sys
 import types
 from pathlib import Path
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -253,3 +255,96 @@ def test_format_reply_uses_message_fallback_and_marks_bot_sender(image_handler):
     )
 
     assert formatted == "[引用 >>> 水原千鹤(你)(ID:3683026476): 旧版引用文本]\n"
+
+
+def test_describe_image_reuses_cache_without_model_call(image_handler):
+    handler, _, Image, _ = image_handler
+    provider = types.SimpleNamespace(text_chat=AsyncMock())
+    context = types.SimpleNamespace(get_provider_by_id=lambda _: provider)
+    cache = types.SimpleNamespace(
+        enabled=True, lookup=Mock(return_value="cached"), save=Mock()
+    )
+    result = asyncio.run(
+        handler.ImageHandler.describe_image(
+            Image("image.png"),
+            context,
+            "vision",
+            "describe",
+            image_description_cache=cache,
+        )
+    )
+    assert result == "cached"
+    provider.text_chat.assert_not_awaited()
+    cache.save.assert_not_called()
+
+
+def test_describe_image_calls_existing_provider_contract_and_saves_cache(image_handler):
+    handler, _, Image, _ = image_handler
+    provider = types.SimpleNamespace(
+        text_chat=AsyncMock(
+            return_value=types.SimpleNamespace(completion_text="a chart")
+        )
+    )
+    context = types.SimpleNamespace(get_provider_by_id=lambda _: provider)
+    cache = types.SimpleNamespace(
+        enabled=True, lookup=Mock(return_value=None), save=Mock()
+    )
+    result = asyncio.run(
+        handler.ImageHandler.describe_image(
+            Image("image.png"),
+            context,
+            "vision",
+            "describe",
+            image_description_cache=cache,
+            session_id="session",
+        )
+    )
+    assert result == "a chart"
+    provider.text_chat.assert_awaited_once_with(
+        prompt="describe",
+        contexts=[],
+        image_urls=["image.png"],
+        func_tool=None,
+        system_prompt="",
+        session_id="session",
+    )
+    cache.save.assert_called_once_with("image.png", "a chart")
+
+
+def test_describe_image_timeout_includes_download_and_preserves_cancellation(
+    image_handler,
+):
+    handler, _, _, _ = image_handler
+
+    async def scenario():
+        provider = types.SimpleNamespace(text_chat=AsyncMock())
+        context = types.SimpleNamespace(get_provider_by_id=lambda _: provider)
+        started = asyncio.Event()
+        stopped = asyncio.Event()
+
+        async def download():
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                stopped.set()
+
+        image = types.SimpleNamespace(convert_to_file_path=download)
+        with pytest.raises(asyncio.TimeoutError):
+            await handler.ImageHandler.describe_image(
+                image, context, "v", "p", timeout=0.01
+            )
+        assert stopped.is_set()
+        started.clear()
+        stopped.clear()
+        task = asyncio.create_task(
+            handler.ImageHandler.describe_image(image, context, "v", "p")
+        )
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert stopped.is_set()
+        provider.text_chat.assert_not_awaited()
+
+    asyncio.run(scenario())
