@@ -15,6 +15,7 @@
 所有配置通过方法参数传入，本模块不直接读取任何配置。
 """
 
+import asyncio
 import json
 import time
 from dataclasses import dataclass
@@ -204,7 +205,11 @@ class ForwardMessageParser:
             message_ids.append(int(message_id))
         for value in message_ids:
             try:
-                response = await call_action("get_msg", message_id=value)
+                # This may be an ordinary quote; do not spend the whole caption
+                # budget discovering its type. At most two five-second attempts.
+                response = await asyncio.wait_for(
+                    call_action("get_msg", message_id=value), timeout=5
+                )
                 if isinstance(response, dict):
                     payload = response.get("data", response)
                     if isinstance(payload, dict) and isinstance(

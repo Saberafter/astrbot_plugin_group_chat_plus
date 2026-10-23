@@ -373,7 +373,6 @@
 | `enable_forward_message_parsing` | bool | `false` | 启用 QQ / OneBot 合并转发解析。解析器会把转发内容整理成单条可读文本并继续参与后续上下文与 AI 流程，而不是拆成多条消息 |
 | `enable_forward_image_processing` | bool | `false` | 在群聊合并转发进入文字缓存前识图。需要同时开启转发解析、图片处理并配置图片转文字提供商，遵循 `image_to_text_scope`。未触发回复也可能产生识图费用 |
 | `forward_media_timeout` | int | `90` | 每条源转发任务的总超时，包含获取、下载和识图，限制在 10-180 秒。同一转发的并发引用共享任务和剩余时间 |
-| `forward_followup_window` | int | `0` | 无引用的直接 @ 追问关联窗口，限制在 0-600 秒，0 为关闭。开启后同群同发送者第一次直接 @ 可关联最近转发一次，不判断话题语义 |
 | `forward_max_nesting_depth` | int | `3` | 嵌套转发的最大解析深度（0=不展开嵌套，仅保留占位式降级；最大10）。在深度范围内会递归展开子转发，并尽量保留发送者信息与时间戳格式 |
 
 转发识图的范围、缓存和失败处理见 [合并转发图片](FORWARD_IMAGES.md)。

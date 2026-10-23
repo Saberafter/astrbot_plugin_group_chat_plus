@@ -1228,12 +1228,6 @@ class ChatPlus(Star):
             )
         except (ValueError, TypeError):
             self.forward_media_timeout = 90
-        try:
-            self.forward_followup_window = min(
-                600, max(0, int(config.get("forward_followup_window", 0)))
-            )
-        except (ValueError, TypeError):
-            self.forward_followup_window = 0
         self.forward_media_processor = ForwardMediaProcessor()
 
         # 嵌套转发最大解析深度（0=不展开嵌套转发，仅保留占位式降级；硬上限10层）
@@ -4343,6 +4337,8 @@ class ChatPlus(Star):
             and self.image_to_text_provider_id
         ):
             return False
+        if self._should_ignore_at_all(event) or self._should_ignore_at_others(event):
+            return False
         is_at = MessageProcessor.is_at_message(event)
         has_keyword, _ = KeywordChecker.check_trigger_keywords_with_match(
             event, self.trigger_keywords
@@ -4370,17 +4366,7 @@ class ChatPlus(Star):
                 getattr(event, "session_id", ""),
             )
 
-        return await self.forward_media_processor.prepare(
-            event,
-            policy,
-            describe,
-            link_followup=any(
-                isinstance(component, At)
-                and str(component.qq) == str(event.get_self_id())
-                for component in event.message_obj.message
-            ),
-            followup_seconds=self.forward_followup_window,
-        )
+        return await self.forward_media_processor.prepare(event, policy, describe)
 
     async def restart_core(self):
         """

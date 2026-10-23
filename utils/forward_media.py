@@ -40,11 +40,7 @@ class ForwardMediaResult:
 @dataclass
 class _Entry:
     task: asyncio.Task
-    sender: str
-    created_at: float
     expires_at: float = float("inf")
-    followup_used: bool = False
-    original_forward: bool = False
 
 
 def allows_image_caption(scope: str, is_at: bool, has_keyword: bool) -> bool:
@@ -116,20 +112,16 @@ class ForwardMediaProcessor:
     async def _resolve(
         self,
         key,
-        sender,
         factory,
         timeout,
-        original_forward=False,
-        state: Optional[ForwardParseState] = None,
+        state: ForwardParseState,
     ):
         self._prune()
         entry = self._entries.get(key)
         if entry is None:
             if self._closed:
                 text = "[转发处理已停止，内容尚未读取]"
-                return ForwardMediaResult(
-                    text if state is None or state.is_forward else "", "closed"
-                )
+                return ForwardMediaResult(text if state.is_forward else "", "closed")
             if len(self._entries) >= self.max_entries:
                 for old_key, old_entry in list(self._entries.items()):
                     if old_entry.task.done():
@@ -137,15 +129,13 @@ class ForwardMediaProcessor:
                         break
                 else:
                     text = "[转发处理繁忙，内容尚未读取]"
-                    return ForwardMediaResult(
-                        text if state is None or state.is_forward else "", "busy"
-                    )
+                    return ForwardMediaResult(text if state.is_forward else "", "busy")
 
             async def run():
                 try:
                     return await asyncio.wait_for(factory(), timeout=max(1, timeout))
                 except asyncio.TimeoutError:
-                    if state is not None and not state.is_forward:
+                    if not state.is_forward:
                         return ForwardMediaResult("", "unknown")
                     return ForwardMediaResult(
                         "[转发处理超时，内容未完整读取，请勿推测其中的图片]", "timeout"
@@ -154,16 +144,11 @@ class ForwardMediaProcessor:
                     logger.warning(
                         f"[Forward media] resolve_failed={type(exc).__name__}"
                     )
-                    if state is not None and not state.is_forward:
+                    if not state.is_forward:
                         return ForwardMediaResult("", "unknown")
                     return ForwardMediaResult("[转发获取失败，内容尚未读取]", "failed")
 
-            entry = _Entry(
-                asyncio.create_task(run()),
-                str(sender),
-                self.clock(),
-                original_forward=original_forward,
-            )
+            entry = _Entry(asyncio.create_task(run()))
             self._entries[key] = entry
 
             def finished(task):
@@ -186,20 +171,12 @@ class ForwardMediaProcessor:
         event,
         policy: ForwardMediaPolicy,
         describe,
-        link_followup: bool = False,
-        followup_seconds: float = 180,
     ) -> bool:
-        """Prepare top-level forwards and exact quotes before text-only caching.
-
-        Optionally link the first directly addressed follow-up from the same
-        sender to their most recent forward. This never links other senders or
-        sessions, and never waits for unrelated background work.
-        """
+        """Prepare top-level forwards and exact quotes before text-only caching."""
         chain = event.message_obj.message
         if self._closed or not ForwardMessageParser.supports(event):
             return False
         session = event.unified_msg_origin
-        sender = str(event.get_sender_id())
         options = dict(
             include_sender_info=policy.include_sender,
             include_timestamp=policy.include_timestamp,
@@ -230,9 +207,7 @@ class ForwardMediaProcessor:
                     snapshot.message_obj.message,
                 )
 
-            result = await self._resolve(
-                key, sender, load, policy.timeout, original_forward=True
-            )
+            result = await self._resolve(key, load, policy.timeout, state)
             if result.chain is not None:
                 event.message_obj.message = list(result.chain)
             else:
@@ -249,8 +224,9 @@ class ForwardMediaProcessor:
             )
             return True
 
-        replies = [component for component in chain if isinstance(component, Reply)]
-        for reply in replies:
+        for index, reply in enumerate(chain):
+            if not isinstance(reply, Reply):
+                continue
             message_id = str(getattr(reply, "id", "") or "")
             if not message_id:
                 continue
@@ -271,39 +247,16 @@ class ForwardMediaProcessor:
                     renderer.unread,
                 )
 
-            result = await self._resolve(
-                key, sender, load_quote, policy.timeout, state=state
-            )
+            result = await self._resolve(key, load_quote, policy.timeout, state)
             if result.text:
+                # Replace the component without mutating another event's quote.
+                reply = copy.copy(reply)
                 reply.message_str = result.text
                 reply.chain = [Plain(text=result.text)]
-                entry = self._entries.get(key)
-                if entry is not None and entry.sender == sender:
-                    entry.followup_used = True
+                chain = list(chain)
+                chain[index] = reply
+                event.message_obj.message = chain
                 logger.info(f"[Forward media] quote_status={result.status}")
-
-        if not replies and link_followup and followup_seconds > 0:
-            self._prune()
-            candidates = [
-                entry
-                for key, entry in self._entries.items()
-                if key[0] == session
-                and key[2] == policy
-                and entry.original_forward
-                and entry.sender == sender
-                and not entry.followup_used
-                and self.clock() - entry.created_at <= followup_seconds
-            ]
-            if candidates:
-                entry = max(candidates, key=lambda item: item.created_at)
-                entry.followup_used = True
-                result = await asyncio.shield(entry.task)
-                if result.text:
-                    chain.insert(
-                        0,
-                        Plain(text=f"[你刚才转发的记录]\n{result.text}\n[当前消息]\n"),
-                    )
-                    self._sync_text(event)
         return False
 
     @staticmethod
